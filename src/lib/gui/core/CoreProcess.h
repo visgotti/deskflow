@@ -106,6 +106,8 @@ private:
   void startForegroundProcess(const QStringList &args);
   void startProcessFromDaemon();
   void stopForegroundProcess();
+  void terminateForegroundProcess();
+  void connectCoreIpc();
   void stopProcessFromDaemon();
   QPair<bool, QString> persistServerConfig() const;
   void setConnectionState(ConnectionState state);

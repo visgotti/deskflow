@@ -57,6 +57,7 @@ protected:
 
 private:
   void attemptConnection();
+  void disconnectAttemptHandlers();
   void handleHandshakeMessage(const QStringList &parts);
 
   QLocalSocket *m_socket;
@@ -64,6 +65,8 @@ private:
   QString m_socketName;
   QByteArray m_readBuffer;
   int m_retryCount{0};
+  QMetaObject::Connection m_attemptConnected;
+  QMetaObject::Connection m_attemptError;
   QString m_typeName;
 };
 

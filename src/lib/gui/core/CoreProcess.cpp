@@ -25,11 +25,13 @@
 #include <QFile>
 #include <QMetaEnum>
 #include <QMutexLocker>
+#include <QPointer>
 #include <QRegularExpression>
 
 namespace deskflow::gui {
 
 const int kRetryDelay = 1000;
+const int kKillDelay = 5000;
 const auto kLineSplitRegex = QRegularExpression("\r|\n|\r\n");
 
 QString CoreProcess::processModeToString(const Settings::ProcessMode mode)
@@ -148,9 +150,14 @@ void CoreProcess::checkExistingProcess()
   qInfo("checking existing core");
 
   auto *client = new ipc::CoreIpcClient(this);
+  // a core we did not start is an orphan (e.g. left behind when the gui crashed
+  // or was force-quit): we hold no process handle for it, so it can't be shown
+  // or stopped from the gui and keeps its old config and connection. this used
+  // to be left running when its version matched, which wedged the gui with Stop
+  // disabled and every Start exiting as a duplicate. replace it either way.
   connect(client, &ipc::CoreIpcClient::connected, this, [client] {
-    qInfo("existing core has matching version, leaving it running");
-    client->deleteLater();
+    qInfo("existing core was not started by this gui, asking it to stop");
+    client->sendStop();
   });
   connect(client, &ipc::CoreIpcClient::versionMismatch, this, [client] {
     qInfo("existing core has mismatched version, asking it to stop");
@@ -301,19 +308,37 @@ void CoreProcess::stopForegroundProcess()
         m_coreIpcClient = nullptr;
       }
 
-      if (m_process && m_process->state() == QProcess::ProcessState::Running) {
-        m_process->terminate();
-      }
+      terminateForegroundProcess();
     });
     return;
   }
 
   if (m_process->state() == QProcess::ProcessState::Running) {
     qDebug("process is running, terminating");
-    m_process->terminate();
+    terminateForegroundProcess();
   } else {
     qDebug("process is not running, skipping terminate");
   }
+}
+
+void CoreProcess::terminateForegroundProcess()
+{
+  if (!m_process || m_process->state() == QProcess::ProcessState::NotRunning) {
+    return;
+  }
+
+  m_process->terminate();
+
+  // SIGTERM only queues a quit on the core's own event loop, so a wedged core
+  // never exits and the gui would sit in "stopping" forever (and a restart
+  // would wait on it forever). kill it once it has had time to shut down
+  // cleanly: the core waits up to 3 s for clients to disconnect.
+  QTimer::singleShot(kKillDelay, this, [process = QPointer<QProcess>(m_process)] {
+    if (process && process->state() != QProcess::ProcessState::NotRunning) {
+      qWarning("core process ignored terminate, killing it");
+      process->kill();
+    }
+  });
 }
 
 void CoreProcess::stopProcessFromDaemon()
@@ -452,39 +477,7 @@ void CoreProcess::start(std::optional<ProcessMode> processModeOption)
         }
 
         // Delay briefly to give the core process time to start its IPC server.
-        QTimer::singleShot(kRetryDelay, this, [this] {
-          if (m_processState != ProcessState::Started) {
-            return;
-          }
-
-          if (m_coreIpcClient) {
-            m_coreIpcClient->disconnectFromServer();
-            m_coreIpcClient->deleteLater();
-            m_coreIpcClient = nullptr;
-          }
-
-          m_coreIpcClient = new ipc::CoreIpcClient(this);
-
-          // queued so a modal dialog opened by a handler can't block readyRead and strand later messages
-          connect(
-              m_coreIpcClient, &ipc::CoreIpcClient::commandReceived, this, &CoreProcess::onCoreIpcMessageReceived,
-              Qt::QueuedConnection
-          );
-          connect(m_coreIpcClient, &ipc::CoreIpcClient::connected, this, [] {
-            qDebug("connected to core ipc server");
-          });
-          connect(m_coreIpcClient, &ipc::CoreIpcClient::connectionFailed, this, [] {
-            qWarning("failed to establish core ipc connection");
-          });
-          connect(m_coreIpcClient, &ipc::CoreIpcClient::serverShutdown, this, [this, client = m_coreIpcClient] {
-            qDebug("core ipc server shut down cleanly");
-            client->deleteLater();
-            if (m_coreIpcClient == client)
-              m_coreIpcClient = nullptr;
-          });
-
-          m_coreIpcClient->connectToServer();
-        });
+        QTimer::singleShot(kRetryDelay, this, &CoreProcess::connectCoreIpc);
       },
       static_cast<Qt::ConnectionType>(Qt::SingleShotConnection | Qt::QueuedConnection)
   );
@@ -496,6 +489,43 @@ void CoreProcess::start(std::optional<ProcessMode> processModeOption)
   }
 
   m_lastProcessMode = processMode;
+}
+
+void CoreProcess::connectCoreIpc()
+{
+  if (m_processState != ProcessState::Started) {
+    return;
+  }
+
+  if (m_coreIpcClient) {
+    m_coreIpcClient->disconnectFromServer();
+    m_coreIpcClient->deleteLater();
+    m_coreIpcClient = nullptr;
+  }
+
+  m_coreIpcClient = new ipc::CoreIpcClient(this);
+
+  // queued so a modal dialog opened by a handler can't block readyRead and strand later messages
+  connect(
+      m_coreIpcClient, &ipc::CoreIpcClient::commandReceived, this, &CoreProcess::onCoreIpcMessageReceived,
+      Qt::QueuedConnection
+  );
+  connect(m_coreIpcClient, &ipc::CoreIpcClient::connected, this, [] { qDebug("connected to core ipc server"); });
+  connect(m_coreIpcClient, &ipc::CoreIpcClient::connectionFailed, this, [this] {
+    // connection state only ever reaches the gui over this link, so without it
+    // the status shown is frozen at whatever arrived last. keep retrying while
+    // the core runs; the core queues state changes and replays them on hello.
+    qWarning("core ipc connection failed or lost, retrying in %d ms", kRetryDelay);
+    QTimer::singleShot(kRetryDelay, this, &CoreProcess::connectCoreIpc);
+  });
+  connect(m_coreIpcClient, &ipc::CoreIpcClient::serverShutdown, this, [this, client = m_coreIpcClient] {
+    qDebug("core ipc server shut down cleanly");
+    client->deleteLater();
+    if (m_coreIpcClient == client)
+      m_coreIpcClient = nullptr;
+  });
+
+  m_coreIpcClient->connectToServer();
 }
 
 void CoreProcess::stop(std::optional<ProcessMode> processModeOption)
@@ -515,6 +545,12 @@ void CoreProcess::stop(std::optional<ProcessMode> processModeOption)
 
   if (m_processState == ProcessState::Starting) {
     qDebug("core process is starting, cancelling");
+    setProcessState(ProcessState::Stopped);
+  } else if (m_processState == ProcessState::RetryPending) {
+    // nothing is running between retries, so no finished signal will ever
+    // arrive to move us out of Stopping; cancel the pending start instead
+    qDebug("core process retry pending, cancelling");
+    m_retryTimer.stop();
     setProcessState(ProcessState::Stopped);
   } else if (m_processState != ProcessState::Stopped) {
     setProcessState(ProcessState::Stopping);

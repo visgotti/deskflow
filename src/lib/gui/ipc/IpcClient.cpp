@@ -14,6 +14,8 @@
 
 namespace deskflow::gui::ipc {
 
+const int kAttemptRetryDelay = 200;
+
 IpcClient::IpcClient(QObject *parent, const QString &socketName, const QString &typeName)
     : QObject(parent),
       m_socket{new QLocalSocket(this)},
@@ -67,9 +69,16 @@ void IpcClient::attemptConnection()
   m_state = State::Connecting;
   m_retryCount++;
 
-  connect(
+  // exactly one of these two handlers fires per attempt, and each one drops the
+  // other. left armed, the error handler of a successful attempt would fire on
+  // the first error of the established connection and start a phantom retry
+  // loop; the connected handler of a failed attempt would send a second hello.
+  disconnectAttemptHandlers();
+
+  m_attemptConnected = connect(
       m_socket, &QLocalSocket::connected, this,
       [this] {
+        disconnectAttemptHandlers();
         const auto versionId = QStringLiteral("%1+%2").arg(kVersion, kVersionGitSha);
         m_socket->write(QStringLiteral("hello=%1\n").arg(versionId).toUtf8());
         qDebug().noquote() << QStringLiteral("%1 ipc client sent hello with version: %2").arg(m_typeName, versionId);
@@ -77,19 +86,27 @@ void IpcClient::attemptConnection()
       Qt::SingleShotConnection
   );
 
-  connect(
+  m_attemptError = connect(
       m_socket, &QLocalSocket::errorOccurred, this,
       [this] {
+        disconnectAttemptHandlers();
         qWarning().noquote(
         ) << QStringLiteral("%1 ipc client failed to connect: %2").arg(m_typeName, m_socket->errorString());
         m_socket->disconnectFromServer();
         m_state = State::Unconnected;
-        QTimer::singleShot(0, this, &IpcClient::attemptConnection);
+        // give a server that is still starting up a moment to begin listening
+        QTimer::singleShot(kAttemptRetryDelay, this, &IpcClient::attemptConnection);
       },
       Qt::SingleShotConnection
   );
 
   m_socket->connectToServer(m_socketName);
+}
+
+void IpcClient::disconnectAttemptHandlers()
+{
+  disconnect(m_attemptConnected);
+  disconnect(m_attemptError);
 }
 
 void IpcClient::disconnectFromServer()
