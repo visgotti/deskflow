@@ -2026,30 +2026,32 @@ void Server::removeOldClient(BaseClientProxy *client)
 
 void Server::forceLeaveClient(const BaseClientProxy *client)
 {
-  if (const auto *active = (m_activeSaver != nullptr) ? m_activeSaver : m_active; active == client) {
+  // the primary screen is entered exactly when it is m_active (switchScreen()
+  // always leaves the old screen before entering the new one, including when
+  // the screen saver pulls the cursor home), so only m_active decides whether
+  // we must jump. this used to test m_activeSaver first, which skipped the
+  // jump or the enter() whenever saver state was set -- e.g. its "deactivated"
+  // event never arrived -- leaving the primary left with no client to return
+  // to: on macOS the event tap then swallows every local click and key.
+  if (m_active == client) {
     // record new position (center of primary screen)
     m_primaryClient->getCursorCenter(m_x, m_y);
 
     // stop waiting to switch to this client
-    if (active == m_switchScreen) {
+    if (client == m_switchScreen) {
       stopSwitch();
     }
 
     // don't notify active screen since it has probably already
     // disconnected.
     LOG(
-        (CLOG_INFO "jump from \"%s\" to \"%s\" at %d,%d", getName(active).c_str(), getName(m_primaryClient).c_str(),
+        (CLOG_INFO "jump from \"%s\" to \"%s\" at %d,%d", getName(client).c_str(), getName(m_primaryClient).c_str(),
          m_x, m_y)
     );
 
     // cut over
     m_active = m_primaryClient;
-
-    // enter new screen (unless we already have because of the
-    // screen saver)
-    if (m_activeSaver == nullptr) {
-      m_primaryClient->enter(m_x, m_y, m_seqNum, m_primaryClient->getToggleMask(), false);
-    }
+    m_primaryClient->enter(m_x, m_y, m_seqNum, m_primaryClient->getToggleMask(), false);
   }
 
   // if this screen had the cursor when the screen saver activated
