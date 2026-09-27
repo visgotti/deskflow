@@ -95,7 +95,7 @@ protected:
 private:
   using MessageParser = bool (ClientProxy1_0::*)(const uint8_t *);
 
-  ClientInfo m_info;
+  ClientInfo m_info{};
   double m_heartbeatAlarm;
   EventQueueTimer *m_heartbeatTimer = nullptr;
   MessageParser m_parser = &ClientProxy1_0::parseHandshakeMessage;

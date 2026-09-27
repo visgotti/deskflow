@@ -20,6 +20,8 @@ private Q_SLOTS:
   void clientDisconnect_saverPulledCursorHomeThenUserReturned_reentersPrimary();
   void clientDisconnect_saverActivatedOnPrimaryNeverDeactivated_reentersPrimary();
   void clientDisconnect_duringScreensaver_staysHomeWhenSaverEnds();
+  void clientDisconnect_duringSwitchDelay_reconnectedClientIsTheOneSwitchedTo();
+  void clientProxy_emptyShapeAfterHandshake_isStillAcknowledged();
 
 private:
   Arch m_arch;

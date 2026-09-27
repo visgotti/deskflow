@@ -107,6 +107,8 @@ private:
   NetworkAddress getAddress(const NetworkAddress &address) const;
 
   bool m_suspended = false;
+  bool m_suspending = false;
+  bool m_resumeRequested = false;
   Server *m_server = nullptr;
   ServerState m_serverState = ServerState::Uninitialized;
   deskflow::Screen *m_serverScreen = nullptr;

@@ -1720,7 +1720,10 @@ CGEventRef OSXScreen::handleCGInputEvent(CGEventTapProxy proxy, CGEventType type
     }
     break;
   case kCGEventTapDisabledByUserInput:
-    LOG_ERR("quartz event tap was disabled by user input");
+    // left disabled, the server gets no more input events: the cursor can
+    // never cross to a client while every client still shows as connected
+    LOG_WARN("quartz event tap was disabled by user input, re-enabling");
+    CGEventTapEnable(screen->m_eventTapPort, true);
     break;
   case NX_NULLEVENT:
     break;

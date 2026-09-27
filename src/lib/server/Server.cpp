@@ -1971,6 +1971,11 @@ void Server::closeClient(BaseClientProxy *client, const char *msg)
 
   m_oldClients.try_emplace(client, timer);
 
+  // it's gone as far as we're concerned; don't leave the gui listing it
+  using enum deskflow::core::ConnectionState;
+  ipcSendConnectionState(m_clients.size() <= 1 ? Listening : Connected);
+  sendConnectedClientsIpc();
+
   // if this client is the active screen then we have to
   // jump off of it
   forceLeaveClient(client);
@@ -2026,6 +2031,15 @@ void Server::removeOldClient(BaseClientProxy *client)
 
 void Server::forceLeaveClient(const BaseClientProxy *client)
 {
+  // stop waiting to switch to this client. this must not depend on where the
+  // cursor is: a switch-delay/double-tap wait starts while the cursor is still
+  // on the *source* screen, and a pointer left behind here is switched to when
+  // the wait fires (or reused when the client reconnects) after the client has
+  // been deleted.
+  if (client == m_switchScreen) {
+    stopSwitch();
+  }
+
   // the primary screen is entered exactly when it is m_active (switchScreen()
   // always leaves the old screen before entering the new one, including when
   // the screen saver pulls the cursor home), so only m_active decides whether
@@ -2036,11 +2050,6 @@ void Server::forceLeaveClient(const BaseClientProxy *client)
   if (m_active == client) {
     // record new position (center of primary screen)
     m_primaryClient->getCursorCenter(m_x, m_y);
-
-    // stop waiting to switch to this client
-    if (client == m_switchScreen) {
-      stopSwitch();
-    }
 
     // don't notify active screen since it has probably already
     // disconnected.

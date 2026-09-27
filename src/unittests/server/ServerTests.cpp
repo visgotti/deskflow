@@ -11,10 +11,14 @@
 #include "deskflow/IPlatformScreen.h"
 #include "deskflow/Screen.h"
 #include "deskflow/ipc/CoreIpcServer.h"
+#include "io/IStream.h"
 #include "server/BaseClientProxy.h"
+#include "server/ClientProxy1_0.h"
 #include "server/PrimaryClient.h"
 #include "server/Server.h"
 
+#include <algorithm>
+#include <cstring>
 #include <memory>
 
 namespace {
@@ -227,11 +231,15 @@ public:
     x = 0;
     y = 0;
   }
+  bool m_entered = false;
+
   void enter(int32_t, int32_t, uint32_t, KeyModifierMask, bool) override
   {
+    m_entered = true;
   }
   bool leave() override
   {
+    m_entered = false;
     return true;
   }
   void setClipboard(ClipboardID, const IClipboard *) override
@@ -308,13 +316,46 @@ struct ServerHarness
   std::unique_ptr<Server> server;
   FakeClientProxy *client = new FakeClientProxy("client"); // deleted by server on disconnect
 
-  ServerHarness()
+  explicit ServerHarness(int switchDelayMs = 0)
   {
     config.addScreen("server");
     config.addScreen("client");
     config.connect("server", Direction::Right, 0.0f, 1.0f, "client", 0.0f, 1.0f);
     config.connect("client", Direction::Left, 0.0f, 1.0f, "server", 0.0f, 1.0f);
+    if (switchDelayMs > 0) {
+      config.addOption("", kOptionScreenSwitchDelay, switchDelayMs);
+    }
     server = std::make_unique<Server>(config, &primary, &screen, &events);
+    server->adoptClient(client);
+  }
+
+  ~ServerHarness()
+  {
+    // the fake proxy can't take the close message ~Server sends to live clients
+    if (client != nullptr) {
+      clientDisconnected();
+    }
+  }
+
+  ServerHarness(const ServerHarness &) = delete;
+  ServerHarness &operator=(const ServerHarness &) = delete;
+
+  void moveOnPrimary(int32_t x, int32_t y)
+  {
+    IPrimaryScreen::MotionInfo info{x, y};
+    events.dispatchEvent(
+        Event(EventTypes::PrimaryScreenMotionOnPrimary, primary.getEventTarget(), &info, Event::EventFlags::DontFreeData)
+    );
+  }
+
+  void switchWaitElapsed()
+  {
+    events.dispatchEvent(Event(EventTypes::Timer, server.get()));
+  }
+
+  void reconnectClient()
+  {
+    client = new FakeClientProxy("client");
     server->adoptClient(client);
   }
 
@@ -342,6 +383,78 @@ struct ServerHarness
     client = nullptr;
   }
 };
+
+// Serves queued client->server bytes and records server->client bytes.
+class RecordingStream : public deskflow::IStream
+{
+public:
+  void push(const std::string &bytes)
+  {
+    m_input += bytes;
+  }
+
+  std::string m_written;
+
+  void close() override
+  {
+  }
+  uint32_t read(void *buffer, uint32_t size) override
+  {
+    const auto n = static_cast<uint32_t>(std::min<size_t>(size, m_input.size()));
+    if (buffer != nullptr) {
+      std::memcpy(buffer, m_input.data(), n);
+    }
+    m_input.erase(0, n);
+    return n;
+  }
+  void write(const void *buffer, uint32_t size) override
+  {
+    m_written.append(static_cast<const char *>(buffer), size);
+  }
+  void flush() override
+  {
+  }
+  void shutdownInput() override
+  {
+  }
+  void shutdownOutput() override
+  {
+  }
+  void *getEventTarget() const override
+  {
+    return const_cast<RecordingStream *>(this);
+  }
+  bool isReady() const override
+  {
+    return !m_input.empty();
+  }
+  uint32_t getSize() const override
+  {
+    return static_cast<uint32_t>(m_input.size());
+  }
+
+private:
+  std::string m_input;
+};
+
+std::string infoMessage(int16_t x, int16_t y, int16_t w, int16_t h, int16_t mx, int16_t my)
+{
+  std::string message(kMsgDInfo, 4);
+  for (const int16_t value : {x, y, w, h, int16_t{0}, mx, my}) {
+    message.push_back(static_cast<char>((value >> 8) & 0xff));
+    message.push_back(static_cast<char>(value & 0xff));
+  }
+  return message;
+}
+
+int countOf(const std::string &haystack, const char *needle)
+{
+  int count = 0;
+  for (auto pos = haystack.find(needle, 0, 4); pos != std::string::npos; pos = haystack.find(needle, pos + 4, 4)) {
+    ++count;
+  }
+  return count;
+}
 
 } // namespace
 
@@ -412,6 +525,52 @@ void ServerTests::clientDisconnect_duringScreensaver_staysHomeWhenSaverEnds()
   h.screensaverDeactivated();
   QVERIFY(h.platform->m_entered);
   QVERIFY(h.screen.isOnScreen());
+}
+
+void ServerTests::clientDisconnect_duringSwitchDelay_reconnectedClientIsTheOneSwitchedTo()
+{
+  ServerHarness h(250);
+
+  // touch the edge toward the client (switch delay starts), then back off
+  h.moveOnPrimary(1919, 540);
+  QVERIFY(h.platform->m_entered);
+  h.moveOnPrimary(900, 540);
+
+  // the client drops and comes back as a new connection
+  h.clientDisconnected();
+  h.reconnectClient();
+
+  // the next wait at the same edge must switch to the new connection, not to
+  // the deleted one remembered from before the disconnect
+  h.moveOnPrimary(1919, 540);
+  h.switchWaitElapsed();
+  QVERIFY(h.client->m_entered);
+  QVERIFY(!h.platform->m_entered);
+}
+
+void ServerTests::clientProxy_emptyShapeAfterHandshake_isStillAcknowledged()
+{
+  EventQueue events;
+  auto *stream = new RecordingStream; // owned by the proxy
+  ClientProxy1_0 proxy("client", stream, &events);
+
+  stream->push(infoMessage(0, 0, 1440, 900, 720, 450));
+  events.dispatchEvent(Event(EventTypes::StreamInputReady, stream->getEventTarget()));
+  QCOMPARE(countOf(stream->m_written, kMsgCInfoAck), 1);
+
+  // e.g. sent mid display-reconfiguration. the client ignores mouse motion
+  // until this is acked, so it must be acked even though it's unusable
+  stream->push(infoMessage(0, 0, 0, 0, 0, 0));
+  events.dispatchEvent(Event(EventTypes::StreamInputReady, stream->getEventTarget()));
+  QCOMPARE(countOf(stream->m_written, kMsgCInfoAck), 2);
+
+  int32_t x;
+  int32_t y;
+  int32_t w;
+  int32_t h;
+  proxy.getShape(x, y, w, h);
+  QCOMPARE(w, 1440);
+  QCOMPARE(h, 900);
 }
 
 void ServerTests::SwitchToScreenInfo_alloc_screen()

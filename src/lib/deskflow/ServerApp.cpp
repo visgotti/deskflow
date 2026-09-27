@@ -51,6 +51,8 @@
 
 using namespace deskflow::server;
 
+const double kResumeRetryDelay = 3.0;
+
 //
 // ServerApp
 //
@@ -203,6 +205,10 @@ void ServerApp::stopServer()
     m_server = nullptr;
     m_listener = nullptr;
     m_serverState = Initialized;
+    // ~Server drops clients that didn't ack the close without telling anyone,
+    // so the gui kept listing them as connected (e.g. for the whole of a sleep)
+    ipcSendToClient("connectedClients");
+    ipcSendConnectionState(deskflow::core::ConnectionState::Disconnected);
   } else if (m_serverState == Starting) {
     stopRetryTimer();
     m_serverState = Initialized;
@@ -230,6 +236,7 @@ void ServerApp::closeServerScreen(deskflow::Screen *screen)
 void ServerApp::cleanupServer()
 {
   using enum ServerState;
+  stopRetryTimer();
   stopServer();
   if (m_serverState == Initialized) {
     closePrimaryClient(m_primaryClient);
@@ -422,20 +429,59 @@ PrimaryClient *ServerApp::openPrimaryClient(const std::string &name, deskflow::S
 
 void ServerApp::handleSuspend()
 {
-  if (!m_suspended) {
-    LOG_INFO("suspend");
-    stopServer();
-    m_suspended = true;
+  if (m_suspended) {
+    // already stopped; don't let a pending resume retry fire while asleep
+    stopRetryTimer();
+    return;
+  }
+
+  LOG_INFO("suspend");
+
+  // mark suspended before stopping: stopServer() runs a nested event loop for
+  // up to 3 s while clients disconnect. a second suspend delivered inside it
+  // used to close the same server twice, and a resume delivered inside it was
+  // dropped (not suspended yet), leaving the server stopped after wake.
+  m_suspended = true;
+  m_suspending = true;
+  stopRetryTimer();
+  stopServer();
+  m_suspending = false;
+
+  if (m_resumeRequested) {
+    m_resumeRequested = false;
+    handleResume();
   }
 }
 
 void ServerApp::handleResume()
 {
-  if (m_suspended) {
-    LOG_INFO("resume");
-    startServer();
-    m_suspended = false;
+  if (!m_suspended) {
+    return;
   }
+
+  if (m_suspending) {
+    // still inside handleSuspend()'s nested loop; resume once it unwinds
+    m_resumeRequested = true;
+    return;
+  }
+
+  LOG_INFO("resume");
+  if (startServer()) {
+    m_suspended = false;
+    return;
+  }
+
+  // unlike a failed first start (reported by exiting), a failed restart after
+  // wake is usually transient -- e.g. the network interface has no address
+  // yet -- and there's no one watching to restart us: without retrying, the
+  // core sat there with no listener while the gui showed its last state.
+  LOG_WARN("could not restart the server after resume, retrying in %.0f seconds", kResumeRetryDelay);
+  stopRetryTimer();
+  m_timer = getEvents()->newOneShotTimer(kResumeRetryDelay, nullptr);
+  getEvents()->addHandler(EventTypes::Timer, m_timer, [this](const auto &) {
+    stopRetryTimer();
+    handleResume();
+  });
 }
 
 ClientListener *ServerApp::openClientListener(const NetworkAddress &address)

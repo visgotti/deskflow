@@ -388,7 +388,19 @@ bool ClientProxy1_0::recvInfo()
 
   // validate
   if (w <= 0 || h <= 0) {
-    return false;
+    if (m_info.m_w <= 0 || m_info.m_h <= 0) {
+      // no usable shape yet (handshake), nothing to fall back on
+      return false;
+    }
+
+    // a client can report an empty shape mid display-reconfiguration (wake,
+    // lid, monitor change). keep the last good shape but still acknowledge:
+    // the client ignores all mouse motion until its info is acked, so
+    // rejecting it left the client deaf to the mouse for the rest of the
+    // session while it still showed as connected.
+    LOG_WARN("keeping previous shape, client \"%s\" sent an empty one", getName().c_str());
+    ProtocolUtil::writef(getStream(), kMsgCInfoAck);
+    return true;
   }
   if (mx < x || mx >= x + w || my < y || my >= y + h) {
     mx = x + w / 2;
