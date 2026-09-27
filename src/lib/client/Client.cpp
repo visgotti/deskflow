@@ -462,6 +462,12 @@ void Client::setupConnection()
   m_events->addHandler(EventTypes::StreamOutputShutdown, m_stream->getEventTarget(), [this](const auto &) {
     handleDisconnected();
   });
+  // an oversized or malformed packet length leaves the stream buffering
+  // forever with nothing delivered; drop and reconnect instead of waiting
+  // for the keepalive alarm (up to 90 s with a long heartbeat)
+  m_events->addHandler(EventTypes::StreamInputFormatError, m_stream->getEventTarget(), [this](const auto &) {
+    disconnect("invalid packet from server");
+  });
 }
 
 bool Client::setupScreen(int16_t protocolMinor)
@@ -533,6 +539,7 @@ void Client::cleanupConnection()
     m_events->removeHandler(StreamOutputShutdown, m_stream->getEventTarget());
     m_events->removeHandler(SocketDisconnected, m_stream->getEventTarget());
     m_events->removeHandler(ClientDisconnectRequested, m_stream->getEventTarget());
+    m_events->removeHandler(StreamInputFormatError, m_stream->getEventTarget());
     cleanupStream();
   }
 }

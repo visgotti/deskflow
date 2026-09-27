@@ -174,10 +174,19 @@ void ClientApp::handleClientConnected()
   // Reset server index on successful connection
   m_currentServerIndex = 0;
   m_lastServerAddressIndex = 0;
+  // and the retry backoff: otherwise every outage adds to it for the life of the
+  // process, and once it passes 300 failed attempts (with dynamic retry on) a
+  // server that comes back is only retried every 5 s to 5 min
+  m_retryCount = 0;
 }
 
 void ClientApp::handleClientFailed(const Event &e)
 {
+  // this is also where an established session ends when the server stops
+  // answering keepalives or sends garbage, and nothing else reports that: the
+  // gui kept showing "connected" until a later attempt resolved the host name
+  ipcSendConnectionState(deskflow::core::ConnectionState::Disconnected);
+
   if ((++m_lastServerAddressIndex) < m_client->getLastResolvedAddressesCount()) {
     // Try next resolved address for current hostname
     std::unique_ptr<Client::FailInfo> info(static_cast<Client::FailInfo *>(e.getData()));
@@ -206,6 +215,7 @@ void ClientApp::handleClientFailed(const Event &e)
 
 void ClientApp::handleClientRefused(const Event &e)
 {
+  ipcSendConnectionState(deskflow::core::ConnectionState::Disconnected);
   std::unique_ptr<Client::FailInfo> info(static_cast<Client::FailInfo *>(e.getData()));
 
   if (!info->m_retry) {
