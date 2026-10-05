@@ -420,9 +420,13 @@ void EventQueue::waitForReady() const
   double timeout = Arch::time() + 10;
   Lock lock(m_readyMutex);
 
-  while (!m_readyCondVar->wait()) {
-    if (Arch::time() > timeout) {
-      throw std::runtime_error("event queue is not ready within 5 sec");
+  // check before waiting: a loop that became ready first has already signalled,
+  // and waiting for that signal again ended in this throw, which aborts the core
+  // when it comes from a worker thread (e.g. the macos power watcher)
+  while (!*m_readyCondVar) {
+    m_readyCondVar->wait();
+    if (!*m_readyCondVar && Arch::time() > timeout) {
+      throw std::runtime_error("event queue is not ready within 10 sec");
     }
   }
 }

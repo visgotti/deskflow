@@ -87,4 +87,34 @@ void EventQueueTests::timer_subSecondInterval_firesEveryInterval()
   QVERIFY2(firedInHalfASecond >= 10, qPrintable(QStringLiteral("fired %1 times").arg(firedInHalfASecond)));
 }
 
+void EventQueueTests::waitForReady_loopAlreadyRunning_returnsAtOnce()
+{
+  // the macos power watcher waits for the loop from its own thread, and the loop
+  // can win that race; it then missed the ready signal and threw 10 s later
+  EventQueue events;
+  std::promise<void> started;
+
+  std::thread loop([&events, &started] {
+    events.addHandler(EventTypes::ClientConnected, &started, [&started](const Event &) { started.set_value(); });
+    events.addEvent(Event(EventTypes::ClientConnected, &started));
+    events.loop();
+  });
+  started.get_future().wait();
+
+  const auto begin = std::chrono::steady_clock::now();
+  bool threw = false;
+  try {
+    events.waitForReady();
+  } catch (const std::runtime_error &) {
+    threw = true;
+  }
+  const auto waited = std::chrono::steady_clock::now() - begin;
+
+  events.addEvent(Event(EventTypes::Quit));
+  loop.join();
+
+  QVERIFY(!threw);
+  QVERIFY(waited < std::chrono::seconds(1));
+}
+
 QTEST_MAIN(EventQueueTests)

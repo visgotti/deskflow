@@ -21,6 +21,7 @@ private Q_SLOTS:
   void dispatchEvent_noTypeHandler_dispatchesUnknownHandler();
   void dispatchEvent_handlerRemovesItself_keepsHandlerAliveUntilReturn();
   void timer_subSecondInterval_firesEveryInterval();
+  void waitForReady_loopAlreadyRunning_returnsAtOnce();
 
 private:
   Arch m_arch;
