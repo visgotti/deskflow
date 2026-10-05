@@ -8,6 +8,7 @@
 
 #pragma once
 
+#include "base/EventLoopWatchdog.h"
 #include "base/EventQueue.h"
 #include "base/Log.h"
 #include "common/ExitCodes.h"
@@ -121,6 +122,16 @@ public:
 
 protected:
   void runEventsLoop(const void *);
+
+  /**
+   * @brief Watches the event loop; keep the result alive while the loop runs.
+   *
+   * If the loop stops responding the core records where its threads are stuck
+   * (macOS: a stack sample next to the log file) and exits with s_exitStalled.
+   * The gui and the daemon restart it, which is what stopping and starting it
+   * by hand used to do.
+   */
+  std::unique_ptr<EventLoopWatchdog> watchEventLoop() const;
 
   struct LoopErrorCode
   {

@@ -338,7 +338,9 @@ int ClientApp::mainLoop()
   // run event loop.  if startClient() failed we're supposed to retry
   // later.  the timer installed by startClient() will take care of
   // that.
+  auto watchdog = watchEventLoop();
   int exitCode = getEvents()->loop();
+  watchdog.reset();
 
   // close down
   LOG_DEBUG("stopping client");

@@ -186,6 +186,16 @@ void CoreProcess::onProcessFinished(int exitCode, QProcess::ExitStatus)
     m_retryTimer.stop();
   }
 
+  if (exitCode == s_exitStalled && m_processState == Started) {
+    // the core's event loop stopped responding and it exited to be replaced:
+    // restart it, as stopping and starting it by hand used to
+    qWarning("core process stopped responding, restarting it");
+    setProcessState(RetryPending);
+    m_retryTimer.setSingleShot(true);
+    m_retryTimer.start(kRetryDelay);
+    return;
+  }
+
   if (exitCode != s_exitSuccess) {
     setProcessState(Stopped);
     if (exitCode == s_exitDuplicate) {

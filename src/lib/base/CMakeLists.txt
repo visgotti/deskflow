@@ -16,6 +16,8 @@ add_library(base STATIC ${PLATFORM_CODE}
   BaseException.h
   DirectionTypes.h
   Event.h
+  EventLoopWatchdog.cpp
+  EventLoopWatchdog.h
   EventQueue.cpp
   EventQueue.h
   EventQueueTimer.h

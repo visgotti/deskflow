@@ -20,10 +20,24 @@
 #include "base/IEventQueue.h"
 #endif
 
+#include <chrono>
+#include <cstdlib>
 #include <stdexcept>
+#include <string>
+#include <thread>
 
 #if defined(Q_OS_MACOS)
 #include <ApplicationServices/ApplicationServices.h>
+#include <QDir>
+#include <QFile>
+#include <QFileInfo>
+#include <array>
+#include <crt_externs.h>
+#include <ctime>
+#include <fcntl.h>
+#include <spawn.h>
+#include <sys/wait.h>
+#include <unistd.h>
 #endif
 
 #if defined(WINAPI_XWINDOWS) or defined(WINAPI_LIBEI)
@@ -180,4 +194,103 @@ void App::runEventsLoop(const void *)
   if (exitCode != s_exitSuccess) {
     throw ThreadExitException(new LoopErrorCode(exitCode));
   }
+}
+
+namespace {
+
+// longer than anything the loop legitimately blocks on (host name lookups pause
+// the watchdog), and well past the 9 s after which the other end has already
+// given up on us
+constexpr auto kEventLoopStallTimeout = std::chrono::seconds(15);
+
+// the stuck thread may hold the log lock, so the report and the log line get
+// this long before the core exits regardless
+constexpr auto kStallReportBudget = std::chrono::seconds(10);
+
+#if defined(Q_OS_MACOS)
+const auto kStallReportPattern = QStringLiteral("deskflow-core-stall-*.txt");
+constexpr qsizetype kStallReportsKept = 5;
+
+QString stallReportDir()
+{
+  if (Settings::value(Settings::Log::ToFile).toBool()) {
+    return QFileInfo(Settings::value(Settings::Log::File).toString()).absolutePath();
+  }
+  return QDir::tempPath();
+}
+
+void pruneStallReports(const QString &dir)
+{
+  const auto reports = QDir(dir).entryInfoList({kStallReportPattern}, QDir::Files, QDir::Time);
+  for (qsizetype i = kStallReportsKept; i < reports.size(); ++i) {
+    QFile::remove(reports.at(i).absoluteFilePath());
+  }
+}
+
+// samples every thread of this process for a second with the system's sample
+// tool, which needs none of our locks
+void sampleThreads(const std::string &path)
+{
+  const auto pid = std::to_string(getpid());
+  const char *argv[] = {"/usr/bin/sample", pid.c_str(), "1", "-mayDie", "-file", path.c_str(), nullptr};
+
+  posix_spawn_file_actions_t quiet;
+  posix_spawn_file_actions_init(&quiet);
+  posix_spawn_file_actions_addopen(&quiet, STDOUT_FILENO, "/dev/null", O_WRONLY, 0);
+  posix_spawn_file_actions_addopen(&quiet, STDERR_FILENO, "/dev/null", O_WRONLY, 0);
+  if (pid_t child = 0;
+      posix_spawn(&child, argv[0], &quiet, nullptr, const_cast<char *const *>(argv), *_NSGetEnviron()) == 0) {
+    int status = 0;
+    waitpid(child, &status, 0);
+  }
+  posix_spawn_file_actions_destroy(&quiet);
+}
+#endif
+
+[[noreturn]] void exitStalledCore(EventLoopWatchdog::Clock::duration stalledFor, const std::string &reportDir)
+{
+  std::thread([] {
+    std::this_thread::sleep_for(kStallReportBudget);
+    std::_Exit(s_exitStalled);
+  }).detach();
+
+  const auto seconds = static_cast<long long>(std::chrono::duration_cast<std::chrono::seconds>(stalledFor).count());
+
+#if defined(Q_OS_MACOS)
+  // where each thread is stuck is the only evidence of what wedged the loop
+  std::array<char, 32> stamp{};
+  const auto now = std::time(nullptr);
+  std::tm local{};
+  localtime_r(&now, &local);
+  std::strftime(stamp.data(), stamp.size(), "%Y%m%d-%H%M%S", &local);
+  const auto report = reportDir + "/deskflow-core-stall-" + stamp.data() + ".txt";
+  sampleThreads(report);
+  LOG_CRIT(
+      "event loop stopped responding %lld s ago, thread stacks saved to: %s; exiting so the core is restarted", seconds,
+      report.c_str()
+  );
+#else
+  LOG_CRIT("event loop stopped responding %lld s ago; exiting so the core is restarted", seconds);
+#endif
+
+  std::_Exit(s_exitStalled);
+}
+
+} // namespace
+
+std::unique_ptr<EventLoopWatchdog> App::watchEventLoop() const
+{
+#if defined(Q_OS_MACOS)
+  const auto reportDir = stallReportDir();
+  pruneStallReports(reportDir);
+#else
+  const QString reportDir;
+#endif
+
+  return std::make_unique<EventLoopWatchdog>(
+      m_events, kEventLoopStallTimeout,
+      [reportDir = reportDir.toStdString()](EventLoopWatchdog::Clock::duration stalledFor) {
+        exitStalledCore(stalledFor, reportDir);
+      }
+  );
 }

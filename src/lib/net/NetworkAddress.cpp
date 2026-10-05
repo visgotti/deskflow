@@ -9,6 +9,7 @@
 
 #include "arch/Arch.h"
 #include "arch/ArchException.h"
+#include "base/EventLoopWatchdog.h"
 #include "net/SocketException.h"
 
 #include <algorithm>
@@ -128,6 +129,9 @@ size_t NetworkAddress::resolve(size_t index)
     } else {
       std::vector<ArchNetAddress> ipAddresses;
       {
+        // a lookup can take many seconds (e.g. a sleeping host's .local name)
+        // without the event loop being stuck
+        EventLoopWatchdog::Pause slowLookup;
         auto addresses = ARCH->nameToAddr(m_hostname);
         for (auto address : addresses) {
           if (ARCH->getAddrFamily(address) != IArchNetwork::AddressFamily::Unknown) {

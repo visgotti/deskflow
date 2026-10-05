@@ -592,7 +592,9 @@ int ServerApp::mainLoop()
   // run event loop.  if startServer() failed we're supposed to retry
   // later.  the timer installed by startServer() will take care of
   // that.
+  auto watchdog = watchEventLoop();
   int exitCode = getEvents()->loop();
+  watchdog.reset();
 
   // close down
   LOG_DEBUG("stopping server");
