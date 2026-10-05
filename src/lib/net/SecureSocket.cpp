@@ -380,13 +380,22 @@ void SecureSocket::createSSL()
 
 void SecureSocket::freeSSL()
 {
+  // take socket from multiplexer ASAP otherwise the race condition
+  // could cause events to get called on a dead object. TCPSocket
+  // will do this, too, but the double-call is harmless.
+  //
+  // this must happen before taking the ssl lock: removing the socket waits for
+  // the multiplexer thread to finish its current pass, and our jobs in that pass
+  // take the ssl lock (handshake, read, write). holding it here deadlocked both
+  // threads whenever our job was due in the same pass, e.g. a connect timing out
+  // just as the server's handshake reply arrived; the client then sat
+  // "connected" with a dead event loop until it was restarted by hand. once the
+  // socket is removed no job of ours is running or will run again.
+  setJob(nullptr);
+
   std::scoped_lock ssl_lock{ssl_mutex_};
 
   isFatal(true);
-  // take socket from multiplexer ASAP otherwise the race condition
-  // could cause events to get called on a dead object. TCPSocket
-  // will do this, too, but the double-call is harmless
-  setJob(nullptr);
   if (m_ssl) {
     if (m_ssl->m_ssl != nullptr) {
       SSL_set_quiet_shutdown(m_ssl->m_ssl, 1);
