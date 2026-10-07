@@ -15,6 +15,10 @@
 #include <QFile>
 #include <QSignalSpy>
 
+#if !defined(Q_OS_WIN)
+#include <signal.h>
+#endif
+
 using deskflow::core::ProcessState;
 using deskflow::gui::CoreProcess;
 
@@ -78,6 +82,52 @@ void CoreProcessTests::stalledCoreExit_isRestarted()
     return list;
   };
   QTRY_COMPARE_WITH_TIMEOUT(seen(), restarted, 10000);
+
+  process.stop(Settings::ProcessMode::Desktop);
+  QTRY_COMPARE_WITH_TIMEOUT(process.processState(), ProcessState::Stopped, 10000);
+}
+
+void CoreProcessTests::pausedCore_isReplaced()
+{
+  // a stand-in core that has run before stays up until stopped
+  QFile ran(QStringLiteral("%1/fake-core-ran").arg(m_dir.path()));
+  QVERIFY(ran.open(QFile::WriteOnly));
+  ran.close();
+
+  ServerConfig serverConfig;
+  CoreProcess process(serverConfig);
+  process.setMode(Settings::CoreMode::Client);
+  QSignalSpy states(&process, &CoreProcess::processStateChanged);
+
+  // the first core is paused (as macos does when it runs out of swap) and never
+  // resumed, so it can't answer a stop request or SIGTERM
+  qint64 pausedPid = 0;
+  process.setPausedCheck([&pausedPid](qint64 pid) {
+    if (pausedPid == 0) {
+      pausedPid = pid;
+    }
+    return pid == pausedPid;
+  });
+
+  process.start(Settings::ProcessMode::Desktop);
+
+  // the gui kills it and starts a new one by itself
+  const QList<ProcessState> replaced = {
+      ProcessState::Starting, ProcessState::Started, ProcessState::RetryPending, ProcessState::Starting,
+      ProcessState::Started
+  };
+  const auto seen = [&states] {
+    QList<ProcessState> list;
+    for (const auto &args : std::as_const(states)) {
+      list.append(args.at(0).value<ProcessState>());
+    }
+    return list;
+  };
+  QTRY_COMPARE_WITH_TIMEOUT(seen(), replaced, 10000);
+  QVERIFY(pausedPid != 0);
+#if !defined(Q_OS_WIN)
+  QCOMPARE(::kill(static_cast<pid_t>(pausedPid), 0), -1);
+#endif
 
   process.stop(Settings::ProcessMode::Desktop);
   QTRY_COMPARE_WITH_TIMEOUT(process.processState(), ProcessState::Stopped, 10000);

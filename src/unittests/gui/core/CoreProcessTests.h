@@ -17,6 +17,7 @@ private Q_SLOTS:
   void initTestCase();
   void cleanupTestCase();
   void stalledCoreExit_isRestarted();
+  void pausedCore_isReplaced();
 
 private:
   QTemporaryDir m_dir;

@@ -17,6 +17,8 @@
 
 #import <QtGlobal>
 
+#include <libproc.h>
+
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wdeprecated-declarations"
 
@@ -154,4 +156,15 @@ void installQuitHandler(std::function<bool()> shouldQuit)
                                                                 Q_UNUSED(note)
                                                                 s_isSystemShuttingDown = YES;
                                                               }];
+}
+
+bool isProcessPausedForLowMemory(qint64 pid)
+{
+  // set by the kernel while the process is suspended because the system ran out
+  // of swap ("your system has run out of application memory"); cleared on resume
+  proc_bsdinfo info = {};
+  if (proc_pidinfo(static_cast<int>(pid), PROC_PIDTBSDINFO, 0, &info, sizeof(info)) != sizeof(info)) {
+    return false;
+  }
+  return (info.pbi_flags & PROC_FLAG_PA_SUSP) != 0;
 }

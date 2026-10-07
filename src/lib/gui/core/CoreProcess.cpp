@@ -28,10 +28,13 @@
 #include <QPointer>
 #include <QRegularExpression>
 
+#include <utility>
+
 namespace deskflow::gui {
 
 const int kRetryDelay = 1000;
 const int kKillDelay = 5000;
+const int kPausedCheckInterval = 2000;
 const auto kLineSplitRegex = QRegularExpression("\r|\n|\r\n");
 
 QString CoreProcess::processModeToString(const Settings::ProcessMode mode)
@@ -123,6 +126,38 @@ CoreProcess::CoreProcess(const ServerConfig &serverConfig)
       qDebug("retry cancelled, process state is not retry pending");
     }
   });
+
+  connect(&m_pausedCheckTimer, &QTimer::timeout, this, &CoreProcess::replaceIfPaused);
+#if defined(Q_OS_MACOS)
+  setPausedCheck(isProcessPausedForLowMemory);
+#endif
+}
+
+void CoreProcess::setPausedCheck(PausedCheck check)
+{
+  m_pausedCheck = std::move(check);
+  if (m_pausedCheck) {
+    m_pausedCheckTimer.start(kPausedCheckInterval);
+  } else {
+    m_pausedCheckTimer.stop();
+  }
+}
+
+void CoreProcess::replaceIfPaused()
+{
+  if (m_processState != ProcessState::Started || m_replacingPausedCore || !m_process ||
+      m_process->state() != QProcess::ProcessState::Running || !m_pausedCheck(m_process->processId())) {
+    return;
+  }
+
+  // when macos runs out of swap it pauses apps until the user resumes them, but
+  // its dialog only offers apps with a window: resuming the gui left the core
+  // paused for good, its connection dead while the gui still showed the last
+  // state it reported. a paused core can't act on a stop request or SIGTERM, so
+  // kill it and start a new one, as stopping and starting it by hand did
+  qWarning("core process was paused by the os to free memory, restarting it");
+  m_replacingPausedCore = true;
+  m_process->kill();
 }
 
 void CoreProcess::onProcessReadyReadStandardOutput()
@@ -186,10 +221,14 @@ void CoreProcess::onProcessFinished(int exitCode, QProcess::ExitStatus)
     m_retryTimer.stop();
   }
 
-  if (exitCode == s_exitStalled && m_processState == Started) {
-    // the core's event loop stopped responding and it exited to be replaced:
-    // restart it, as stopping and starting it by hand used to
-    qWarning("core process stopped responding, restarting it");
+  const bool replacingPaused = std::exchange(m_replacingPausedCore, false);
+  if ((exitCode == s_exitStalled || replacingPaused) && m_processState == Started) {
+    // the core's event loop stopped responding and it exited to be replaced, or
+    // we killed it because it was paused: restart it, as stopping and starting
+    // it by hand used to
+    if (!replacingPaused) {
+      qWarning("core process stopped responding, restarting it");
+    }
     setProcessState(RetryPending);
     m_retryTimer.setSingleShot(true);
     m_retryTimer.start(kRetryDelay);

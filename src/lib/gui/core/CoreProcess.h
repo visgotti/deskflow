@@ -17,6 +17,8 @@
 #include <QProcess>
 #include <QTimer>
 
+#include <functional>
+
 namespace deskflow::gui {
 
 namespace ipc {
@@ -38,7 +40,14 @@ public:
     StartFailed
   };
 
+  // tells whether the os has paused the core with this pid to free memory
+  using PausedCheck = std::function<bool(qint64 pid)>;
+
   explicit CoreProcess(const ServerConfig &serverConfig);
+
+  // polls the running core with this check and replaces a core it reports
+  // paused; set on macos by default, tests set their own
+  void setPausedCheck(PausedCheck check);
 
   void start(std::optional<ProcessMode> processMode = std::nullopt);
   void stop(std::optional<ProcessMode> processMode = std::nullopt);
@@ -107,6 +116,7 @@ private:
   void startProcessFromDaemon();
   void stopForegroundProcess();
   void terminateForegroundProcess();
+  void replaceIfPaused();
   void connectCoreIpc();
   void stopProcessFromDaemon();
   QPair<bool, QString> persistServerConfig() const;
@@ -131,6 +141,9 @@ private:
   QString m_secureSocketVersion;
   std::optional<ProcessMode> m_lastProcessMode = std::nullopt;
   QTimer m_retryTimer;
+  PausedCheck m_pausedCheck;
+  QTimer m_pausedCheckTimer;
+  bool m_replacingPausedCore = false;
   deskflow::gui::ipc::CoreIpcClient *m_coreIpcClient = nullptr;
   deskflow::gui::ipc::DaemonIpcClient *m_daemonIpcClient = nullptr;
   FileTail *m_daemonFileTail = nullptr;
