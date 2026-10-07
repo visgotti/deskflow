@@ -21,6 +21,12 @@
 #include "arch/win32/ArchMiscWindows.h"
 #endif
 
+#if defined(Q_OS_MACOS)
+#include <cerrno>
+#include <cstring>
+#include <libproc.h>
+#endif
+
 #include <QApplication>
 #include <QFileInfo>
 #include <QSharedMemory>
@@ -81,6 +87,16 @@ int main(int argc, char **argv)
 
   Log log;
   qInstallMessageHandler(qtMessageHandler);
+
+#if defined(Q_OS_MACOS)
+  // when macos runs out of swap it pauses apps until the user resumes them, but
+  // its dialog only offers apps with a window, so a paused core was never
+  // resumed: it sat on a dead connection while the gui showed it connected.
+  // pausing a process this small frees nothing worth that, so opt out
+  if (proc_setpcontrol(PROC_SETPC_NONE) != 0) {
+    LOG_WARN("could not opt out of being paused when memory runs out: %s", strerror(errno));
+  }
+#endif
 
   CoreArgParser parser(QCoreApplication::arguments());
 
