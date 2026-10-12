@@ -8,6 +8,7 @@
 #include "deskflow/IClipboard.h"
 
 #include "base/Log.h"
+#include "deskflow/ClipboardImageCodec.h"
 
 #include <assert.h>
 #include <vector>
@@ -61,7 +62,11 @@ void IClipboard::unmarshall(IClipboard *clipboard, const std::string_view &data,
       // or server supports more clipboard formats than the other
       // then one of them will get a format >= TotalFormats here.
       if (format < IClipboard::Format::TotalFormats) {
-        clipboard->add(format, std::string(index, size));
+        std::string payload(index, size);
+        if (format == IClipboard::Format::Bitmap) {
+          payload = deskflow::clipboard_image::decompress(payload);
+        }
+        clipboard->add(format, payload);
       }
       index += size;
     }
@@ -96,6 +101,9 @@ std::string IClipboard::marshall(const IClipboard *clipboard)
       if (clipboard->has(static_cast<IClipboard::Format>(format))) {
         ++numFormats;
         formatData[format] = clipboard->get(static_cast<IClipboard::Format>(format));
+        if (static_cast<IClipboard::Format>(format) == IClipboard::Format::Bitmap) {
+          formatData[format] = deskflow::clipboard_image::compress(formatData[format]);
+        }
         size += 4 + 4 + (uint32_t)formatData[format].size();
       }
     }

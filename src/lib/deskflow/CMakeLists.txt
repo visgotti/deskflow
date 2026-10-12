@@ -38,6 +38,8 @@ add_library(${lib_name} STATIC ${PLATFORM_CODE}
   Clipboard.h
   ClipboardChunk.cpp
   ClipboardChunk.h
+  ClipboardImageCodec.cpp
+  ClipboardImageCodec.h
   DeskflowException.cpp
   DeskflowException.h
   DisplayInvalidException.h
@@ -96,6 +98,7 @@ target_link_libraries(${lib_name}
     Qt6::Network
   PRIVATE
     platform
+    Qt6::Gui
 )
 
 if(UNIX AND NOT APPLE)

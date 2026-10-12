@@ -230,4 +230,74 @@ void ClipboardTests::equalClipboards()
   clipboard2.close();
 }
 
+namespace {
+void writeU32LE(std::string &buf, size_t offset, uint32_t value)
+{
+  buf[offset + 0] = static_cast<char>(value & 0xff);
+  buf[offset + 1] = static_cast<char>((value >> 8) & 0xff);
+  buf[offset + 2] = static_cast<char>((value >> 16) & 0xff);
+  buf[offset + 3] = static_cast<char>((value >> 24) & 0xff);
+}
+
+void writeU16LE(std::string &buf, size_t offset, uint16_t value)
+{
+  buf[offset + 0] = static_cast<char>(value & 0xff);
+  buf[offset + 1] = static_cast<char>((value >> 8) & 0xff);
+}
+
+// Builds a plain, solid-colour BITMAPINFOHEADER DIB (the clipboard's
+// kBitmap payload: a 40 byte header immediately followed by BI_RGB 24bpp
+// pixel data, no file header) -- large and uniform enough to compress well.
+std::string makeSolidColorDib(int width, int height)
+{
+  const size_t rowSize = static_cast<size_t>(width) * 3; // already DWORD-aligned for width multiples of 4
+  std::string dib(40 + rowSize * static_cast<size_t>(height), '\0');
+
+  writeU32LE(dib, 0, 40);     // biSize
+  writeU32LE(dib, 4, static_cast<uint32_t>(width));
+  writeU32LE(dib, 8, static_cast<uint32_t>(height));
+  writeU16LE(dib, 12, 1);     // biPlanes
+  writeU16LE(dib, 14, 24);    // biBitCount
+  writeU32LE(dib, 16, 0);     // biCompression = BI_RGB
+
+  for (size_t i = 40; i < dib.size(); i += 3) {
+    dib[i + 0] = static_cast<char>(10);  // B
+    dib[i + 1] = static_cast<char>(20);  // G
+    dib[i + 2] = static_cast<char>(30);  // R
+  }
+
+  return dib;
+}
+} // namespace
+
+void ClipboardTests::bitmapImage()
+{
+  using enum IClipboard::Format;
+
+  const std::string dib = makeSolidColorDib(64, 64);
+
+  Clipboard clipboard;
+  clipboard.open(0);
+  clipboard.add(Bitmap, dib);
+  clipboard.close();
+
+  const std::string marshalled = clipboard.marshall();
+  // A solid-colour bitmap should compress to a small fraction of its raw
+  // size once it crosses the wire.
+  QVERIFY(marshalled.size() < dib.size() / 2);
+
+  Clipboard clipboard2;
+  clipboard2.unmarshall(marshalled, 0);
+  clipboard2.open(0);
+  QVERIFY(clipboard2.has(Bitmap));
+  const std::string roundTripped = clipboard2.get(Bitmap);
+  clipboard2.close();
+
+  // Width/height must survive the compress/decompress round trip exactly;
+  // the header shape and bit depth may be normalised in the process.
+  QVERIFY(roundTripped.size() >= 40);
+  QCOMPARE(roundTripped.substr(4, 4), dib.substr(4, 4));
+  QCOMPARE(roundTripped.substr(8, 4), dib.substr(8, 4));
+}
+
 QTEST_MAIN(ClipboardTests)

@@ -261,7 +261,7 @@ QVariant Settings::defaultValue(const QString &key)
     return 250;
 
   if (key == Server::ClipboardSize)
-    return 3; // 3 MiB
+    return 32; // 32 MiB; images are PNG-compressed on the wire, so this covers most screenshots
 
   return QVariant();
 }
